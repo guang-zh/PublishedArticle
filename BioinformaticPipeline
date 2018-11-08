@@ -1,0 +1,172 @@
+## Python coding for High Performance Computing ##
+## Bioinformatics pipleine for analyzing large genetic datasets
+
+# Step1_Trim Raw Reads using FastX toolkit and Check with FastQC reports
+# Step2_Blast Trimmed Reads against the Local Reference Database
+# Step3_Filter Blast Hits for each read
+# Step4_Combine R1 and R2 Blast results using R
+# Step5_Summarize Blast results for each library
+
+
+# Step1_Trim Raw Reads using FastX toolkit and Check with FastQC reports
+#Bash
+cd {files_location}
+R1=R1.fastq.gz 
+R2=R2.fastq.gz
+zcat $R1 | fastq_quality_trimmer -t 20 -l 150 -Q 33 > R1_trimmed.fastq
+zcat $R2 | fastq_quality_trimmer -t 20 -l 150 -Q 33 > R2_trimmed.fastq
+fastqc R1_trimmed.fastq
+fastqc R2_trimmed.fastq
+sed -n '1~4s/^@/>/p;2~4p' R1_trimmed.fastq > R1_trimmed.fasta
+sed -n '1~4s/^@/>/p;2~4p' R2_trimmed.fastq > R2_trimmed.fasta
+
+# Step2_Blast Trimmed Reads against the Local Reference Database
+#Bash
+DB=Local_Reference_Database.fasta
+blast -task blastn -db $DB -query R1_trimmed.fasta -out R1-trimmed.blast.out -max_target_seqs 5 -num_threads 12 -evalue 0.001 -outfmt "6 sstart send qstart qend qseqid sseqid pident length score evalue"
+blast -task blastn -db $DB -query R2_trimmed.fasta -out R2-trimmed.blast.out -max_target_seqs 5 -num_threads 12 -evalue 0.001 -outfmt "6 sstart send qstart qend qseqid sseqid pident length score evalue"
+
+# Step3_Filter Blast Hits for each read
+#Bash
+for file in R1-trimmed.blast.out R2-trimmed.blast.out;do
+threshLen=150
+cat $file | awk -v len=$threshLen '$8>len {print}' | awk '{OFS="\t";if($5==prev){if(id==$7 && len==$8){hit=hit";"$6;$6=hit;j=$0}}else{if(NR>1){print j}else{print "Start","End","Qstart","Qend","Reads","Taxa","Pident","Length","Score","Evalue"};j=$0;hit=$6;id=$7;len=$8}prev=$5}END{print j}' > $file.tophits
+done
+
+# Step4_Combine R1 and R2 Blast results using R
+#R
+library(stringr)
+library(plyr)
+file1<-“R1-trimmed.blast.out.tophits”
+file2<-“R2-trimmed.blast.out.tophits”
+name<-“R1R2”
+columns<-5
+data1<-read.delim(file1,header=T,sep="\t",row.names=columns)
+data2<-read.delim(file2,header=T,sep="\t",row.names=columns)
+### Merge data by rows
+hits<-merge(data1,data2,by="row.names",all=T)
+write.table(file=paste(name,"info",sep="."),hits,quote=F,sep="\t",row.names=F,col.names=T)
+
+
+# Step5_Summarize Blast results for each library
+#BASH
+echo "File	Reads" > RawReadCount.out
+for i in *.fastq.gz;do ###loop through raw read files
+	echo -n "$i	" >> RawReadCount.out
+	zcat $i | echo $((`wc -l`/4)) >> RawReadCount.out	
+done
+
+#BASH
+threshold=95
+Summary="Summary.$threshold.Reads.out"
+Summary2="Summary.$threshold.Species.out"
+
+echo "Library	RawReads	ReadsWithBothBLASTHit	ReadsWithBothBLASTHitProp	ReadsWithBothBLASTHitSameSpecies	ReadsWithBothBLASTHitSameSpeciesProp	ReadsWithBLASTHitRead1	ReadsWithAnyBLASTHitRead1Prop	ReadsWithBLASTHitRead2	ReadsWithAnyBLASTHitRead2Prop	18SBoth	FCBoth	LerayBoth	FolmerBoth	18SBothProp	FCBothProp	LerayBothProp	FolmerBothProp	18SRead1	FCRead1	LerayRead1	FolmerRead1	18SRead1Prop	FCRead1Prop	LerayRead1Prop	FolmerRead1Prop	18SRead2	FCRead2	LerayRead2	FolmerRead2	18SRead2Prop	FCRead2Prop	LerayRead2Prop	FolmerRead2Prop	TotalNum_Species	18S_Species	FC_Species	Leray_Species	Folmer_Species	TotalNum_Species_Read1	18S_Species_Read1	FC_Species_Read1	Leray_Species_Read1	Folmer_Species_Read1	TotalNum_Species_Read2	18S_Species_Read2	FC_Species_Read2	Leray_Species_Read2	Folmer_Species_Read2" > $Summary
+echo "Library	Species	18S	FC	Leray	Folmer	18SProp	FCProp LerayProp	FolmerProp" > $Summary2
+done
+
+###now loop through every library and summarize species overall and then by fragment
+thresh=$threshold
+for file in *info;do ###loop through file
+
+library=${file%.*}
+Fsummary="$file.$threshold.summary"
+Raw=`grep $library /RawReadCount.out | awk '{sum+=$2}END{print sum}'`
+All=`sed '1,1d' $file | awk -v T=$thresh '{if($7>T || $16>T){print $0}}' | wc -l`
+NA1only=`cat $file | awk '{if($3=="NA" && $12!="NA"){print $0}}' |  awk -v T=$thresh '{if($16>T){print $0}}' |wc -l`
+NA2only=`cat $file | awk '{if($3!="NA" && $12=="NA"){print $0}}' |  awk -v T=$thresh '{if($7>T){print $0}}' |wc -l`
+r1=`sed '1,1d' $file | awk -v T=$thresh '{if($6!="NA" && $7>T){print $0}}'  | wc -l`
+r2=`sed '1,1d' $file | awk -v T=$thresh '{if($15!="NA" && $16>T){print $0}}'  | wc -l`
+Opposite=`cat $file | sed '1,1d' | grep -v "	NA	" | awk '{if($6!=$15){print $0}}' | awk -v T=$thresh '{if($7>T && $16>T){print $0}}' | wc -l`
+Both=`grep -v "	NA	" $file | awk -v T=$thresh '{if($7>T && $16>T){print $0}}' | wc -l`
+BothSame=`grep -v "	NA	" $file | awk '{if($6==$15){print $0}}' | awk -v T=$thresh '{if($7>T && $16>T){print $0}}' | wc -l`
+
+##Fragments (18S, FC, Leray, and Folmer), based on where reads map on the reference
+eS=`grep 18S $file | awk -v T=$thresh '{if($6==$15 && $7>T && $16>T){print $0}}' | wc -l`
+FC=`grep COI $file | awk -v T=$thresh '{if($6==$15 && $7>T && $16>T){print $0}}' | awk '{if(($2<400 && $3<400 && $11<400 && $12<400)){print $0}}' | wc -l`
+Leray=`grep COI $file | awk -v T=$thresh '{if($6==$15 && $7>T && $16>T){print $0}}' | awk '{if(($2>300 && $3>300 && $11>300 && $12>300)){print $0}}' | wc -l`
+Folmer=`grep COI $file | awk -v T=$thresh '{if($6==$15 && $7>T && $16>T){print $0}}' | awk '{if(($2<300 || $3<300 || $11<300 || $12<300) && ($2>400 || $4>500 || $11>400 || $12>400)){print $0}}' | wc -l`
+		
+eSr1=`grep 18S $file | awk -v T=$thresh '{if($6!="NA" && $7>T){print $6}}' | wc -l`
+FCr1=`grep COI $file | awk -v T=$thresh '{if($6!="NA" && $7>T){print $0}}' | awk '{if(($2<400 && $3<400)){print $6}}' | wc -l`
+Lerayr1=`grep COI $file | awk -v T=$thresh '{if($6!="NA" && $7>T){print $0}}' | awk '{if(($2>300 && $3>300)){print $6}}' |wc -l`
+Folmerr1=`grep COI $file | awk -v T=$thresh '{if($6!="NA" && $7>T){print $0}}' | awk '{if(($2<300 || $3<300) && ($2>400 || $3>400)){print $6}}' |wc -l`
+			
+eSr2=`grep 18S $file | awk -v T=$thresh '{if($15!="NA" && $16>T){print $15}}' | wc -l`
+FCr2=`grep COI $file | awk -v T=$thresh '{if($15!="NA" && $16>T){print $0}}' | awk '{if(($11<400 && $12<400)){print $15}}' | wc -l`
+Lerayr2=`grep COI $file | awk -v T=$thresh '{if($15!="NA" && $16>T){print $0}}' | awk '{if(($11>300 && $12>300)){print $15}}' | wc -l`
+Folmerr2=`grep COI $file | awk -v T=$thresh '{if($15!="NA" && $16>T){print $0}}' | awk '{if(($11<300 || $12<300) && ($11>400 || $12>400)){print $15}}' | wc -l`
+		
+##Species summaries, overall
+spAll=`sed 1,1d $file |  awk '{if($6==$15){print $0}}' | awk -v T=$thresh '{if($7>T && $16>T){print $6}}' | sort | uniq | wc -l`
+spAllr1=`sed 1,1d $file | awk -v T=$thresh '{if($6!="NA" && $7>T){print $6}}' | sort | uniq | wc -l`
+spAllr2=`sed 1,1d $file | awk -v T=$thresh '{if($15!="NA" && $16>T){print $15}}' | sort | uniq | wc -l`
+##Species summaries per fragment		
+speS=`grep 18S $file | awk -v T=$thresh '{if($6==$15 && $7>T && $16>T){print $0}}' | cut -f 6 | sort | uniq | wc -l`
+spFC=`grep COI $file | awk -v T=$thresh '{if($6==$15 && $7>T && $16>T){print $0}}' | awk '{if(($2<400 && $3<400 && $11<400 && $12<400)){print $0}}' | cut -f 6 | sort | uniq | wc -l`	
+spLeray=`grep COI $file | awk -v T=$thresh '{if($6==$15 && $7>T && $16>T){print $0}}' | awk '{if(($2>300 && $3>300 && $11>300 && $12>300)){print $0}}' | cut -f 6 | sort | uniq | wc -l`	
+spFolmer=`grep COI  $file | awk -v T=$thresh '{if($6==$15 && $7>T && $16>T){print $0}}' | awk '{if(($2<300 || $3<300 || $11<300 || $12<300) && ($2>400 || $3>400 || $11>400 || $12>400)){print $0}}' | cut -f 6 | sort | uniq | wc -l`		
+
+speSr1=`grep 18S $file | awk -v T=$thresh '{if($6!="NA" && $7>T){print $0}}' | cut -f 6 | sort | uniq | wc -l`
+spFCr1=`grep COI $file | awk -v T=$thresh '{if($6!="NA" && $7>T){print $0}}' | awk '{if(($2<400 && $3<400)){print $6}}' | sort | uniq | wc -l`	
+spLerayr1=`grep COI $file |  awk -v T=$thresh '{if($6!="NA" && $7>T){print $0}}' | awk '{if(($2>300 && $3>300)){print $6}}' | sort | uniq | wc -l`	
+spFolmerr1=`grep COI  $file | awk -v T=$thresh '{if($6!="NA" && $7>T){print $0}}' | awk '{if(($2<300 || $3<300) && ($2>400 || $3>400)){print $6}}' | sort | uniq | wc -l`		
+
+speSr2=`grep 18S $file | awk -v T=$thresh '{if($15!="NA" && $16>T){print $0}}' | cut -f 15 | sort | uniq | wc -l`
+spFCr2=`grep COI $file | awk -v T=$thresh '{if($15!="NA" && $16>T){print $0}}' | awk '{if(($11<400 && $12<400)){print $15}}' | sort | uniq | wc -l`	
+spLerayr2=`grep COI $file |  awk -v T=$thresh '{if($15!="NA" && $16>T){print $0}}' | awk '{if(($11>300 && $12>300)){print $15}}' |sort | uniq | wc -l`	
+spFolmerr2=`grep COI $file |  awk -v T=$thresh '{if($15!="NA" && $16>T){print $0}}' | awk '{if(($11<300 || $12<300) && ($11>400 || $12>400)){print $15}}' | sort | uniq | wc -l`		
+	
+###Proportions
+AllP=`printf %.2f $(echo "$All / $Raw" | bc -l)`
+NA1onlyP=`printf %.2f $(echo "$NA1only / $All" | bc -l)`
+NA2onlyP=`printf %.2f $(echo "$NA2only / $All" | bc -l)`
+r1P=`printf %.2f $(echo "$r1 / $All" | bc -l)`
+r2P=`printf %.2f $(echo "$r2 / $All" | bc -l)`
+OppositeP=`printf %.2f $(echo "$Opposite / $All" | bc -l)`
+BothP=`printf %.2f $(echo "$Both / $All" | bc -l)`
+BothSameP=`printf %.2f $(echo "$BothSame / $All" | bc -l)`
+	
+eSP=`printf %.2f $(echo "$eS / $BothSame" | bc -l)`
+FCP=`printf %.2f $(echo "$FC / $BothSame" | bc -l)`
+LerayP=`printf %.2f $(echo "$Leray / $BothSame" | bc -l)`
+FolmerP=`printf %.2f $(echo "$Folmer / $BothSame" | bc -l)`
+eSr1P=`printf %.2f $(echo "$eSr1 / $r1" | bc -l)`
+FCr1P=`printf %.2f $(echo "$FCr1 / $r1" | bc -l)`
+Lerayr1P=`printf %.2f $(echo "$Lerayr1 / $r1" | bc -l)`
+Folmerr1P=`printf %.2f $(echo "$Folmerr1 / $r1" | bc -l)`
+eSr2P=`printf %.2f $(echo "$eSr2 / $r2" | bc -l)`
+FCr2P=`printf %.2f $(echo "$FCr2 / $r2" | bc -l)`
+Lerayr2P=`printf %.2f $(echo "$Lerayr2 / $r2" | bc -l)`
+Folmerr2P=`printf %.2f $(echo "$Folmerr2 / $r2" | bc -l)`
+
+##Print
+echo "$library	$Raw	$Both	$BothP	$BothSame	$BothSameP	$r1	$r1P	$r2	$r2P	$eS	$FC	$Leray	$Folmer	$eSP	$FCP	$LerayP	$FolmerP	$eSr1	$FCr1	$Lerayr1	$Folmerr1	$eSr1P	$FCr1P	$Lerayr1P	$Folmerr1P	$eSr2	$FCr2	$Lerayr2	$Folmerr2	$eSr2P	$FCr2P	$Lerayr2P	$Folmerr2P	$spAll	$speS	$spFC	$spLeray	$spFolmer	$spAllr1	$speSr1	$spFCr1	$spLerayr1	$spFolmerr1	$spAllr2	$speSr2	$spFCr2	$spLerayr2	$spFolmerr2" >> $Summary
+
+##Print out all species, and number of reads per species per fragment
+Species=`sed '1,1d' $file | awk '{if($6==$15){print $0}}' | awk -v T=$thresh '{if($7>T && $16>T){print $0}}' | cut -f 6 | sort | uniq`
+previous=""
+for sp in $Species;do ###loop through species
+	if [[ $sp != $previous ]];then
+		if [[ $sp =~ ";" ]];then
+eS=`cat $file | grep "$sp" | grep -v COI | awk '{if($6==$15){print $0}}' | awk -v T=$thresh '{if($7>T && $16>T){print $0}}' | wc -l`
+FC=`cat $file  | grep "$sp" | grep -v 18S | awk '{if($6==$15){print $0}}' | awk '{if(($2<400 && $3<400 && $11<400 && $12<400)){print $0}}' | awk -v T=$thresh '{if($7>T && $16>T){print $0}}' | wc -l`
+Leray=`cat $file | grep "$sp" | grep -v 18S | awk '{if($6==$15){print $0}}' | awk '{if(($2>300 && $3>300 && $11>300 && $12>300)){print $0}}'  | awk -v T=$thresh '{if($7>T && $16>T){print $0}}' | wc -l`
+Folmer=`cat $file | grep "$sp" | grep -v 18S  | awk '{if($6==$15){print $0}}' | awk '{if(($2<300 || $3<300 || $11<300 || $12<300) && ($2>400 || $3>400 || $11>400 || $12>400)){print $0}}' | awk -v T=$thresh '{if($7>T && $16>T){print $0}}' | wc -l`
+		else 
+eS=`cat $file | grep "$sp" | grep 18S | awk '{if($6==$15){print $0}}' | awk -v T=$thresh '{if($7>T && $16>T){print $0}}' | wc -l`
+FC=`cat $file  | grep "$sp" | grep COI | awk '{if($6==$15){print $0}}' | awk '{if(($2<400 && $3<400 && $11<400 && $12<400)){print $0}}' | awk -v T=$thresh '{if($7>T && $16>T){print $0}}' | wc -l`
+Leray=`cat $file | grep "$sp" | grep COI | awk '{if($6==$15){print $0}}' | awk '{if(($2>300 && $3>300 && $11>300 && $12>300)){print $0}}'  | awk -v T=$thresh '{if($7>T && $16>T){print $0}}' | wc -l`
+Folmer=`cat $file | grep "$sp" | grep COI | awk '{if($6==$15){print $0}}' | awk '{if(($2<300 || $3<300 || $11<300 || $12<300) && ($2>400 || $3>400 || $11>400 || $12>400)){print $0}}' | awk -v T=$thresh '{if($7>T && $16>T){print $0}}' | wc -l`
+		fi
+###Proportions
+eSP=`printf %.6f $(echo "$eS / $BothSame" | bc -l)`
+FCP=`printf %.6f $(echo "$FC / $BothSame" | bc -l)`
+LerayP=`printf %.6f $(echo "$Leray / $BothSame" | bc -l)`
+FolmerP=`printf %.6f $(echo "$Folmer / $BothSame" | bc -l)`		
+echo "$library	$sp	$eS	$FC	$Leray	$Folmer	$eSP	$FCP	$LerayP	$FolmerP" >> $Summary2
+	fi
+	previous=$sp
+done###end of loop through species
+done###end of loop through file
+
